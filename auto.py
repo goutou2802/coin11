@@ -6432,6 +6432,20 @@ def one_round(dev, ctx, what):
 
         # ---- R5/R6：点前系统弹窗看门狗（安装/权限/跳转确认框）----
         dh = watchdog_hit(pkg0, act0, text0, rows=rows0)   # 源 v2/core/guard.py（通配+强/成对+fail-closed）
+        if dh and all(str(x).startswith("package:com.android.settings") for x in dh) \
+                and not getattr(ctx, "settings_rescued", False):
+            # 2026-11-09（同学真机 22:58:46）：前台上着「系统设置」页 —— 多半是滑动/手势带出来的，
+            # 不是我们点的弹窗。这种**先拉回淘宝一次**再判，别为一页设置把整轮停掉（不动那一页、不点不关）。
+            ctx.settings_rescued = True
+            ctx.log("[guard] 前台是系统设置页（%s）-> am start 拉回淘宝一次，不点不关" % dh)
+            try:
+                dev.am_start_taobao()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(3.0)
+            rows0, pkg0, act0 = r.grab(dev, "01_before.png", "02_before_ocr.json")
+            text0 = text_of(rows0)
+            dh = watchdog_hit(pkg0, act0, text0, rows=rows0)
         if dh:
             r.verdict(False, "系统安装/权限/跳转确认框命中 %s → 不点不关，停下等人" % dh,
                       "system-dialog", hits=dh)
@@ -6931,6 +6945,16 @@ def one_round(dev, ctx, what):
                                           extra={"tap_ms": tap_ms, "secs": secs,
                                                  "secs_source": secs_src, "dwell": dwell},
                                           log=ctx.log)
+        # 2026-11-09（同学 1080x2412 真机 22:58:25）：点前是展开态（6 行），回来看到的是**收起态**（4 行），
+        # 展开区里那条任务于是被当成「消失」/槽位丢失 -> 明明做了却判 skipped。
+        # 复核前先看一眼：这一屏有「展开」且行数比点前少，就先展开、重拍一帧、再判。
+        if (any(str(x.get("t", "")).strip() == "展开" for x in rows7)
+                and len(parse_rows(rows7)) < len(cards0)):
+            _r7e = expand_panel(dev, rows7, ctx.log, ctx.scans_dir)
+            r.rec["postcheck_expanded"] = _r7e[1]
+            rows7 = r.grab(dev, "07_postcheck.jpg", "07_postcheck_ocr.json")[0]
+            ctx.log("[postcheck] 复核帧是收起态 -> 已展开再看（%s），现在 %d 行"
+                    % (_r7e[1], len(parse_rows(rows7))))
         post.append(rows7)
         post_paths.append(r.p("07_postcheck.jpg"))
         panel7 = panel_ok(rows7, what)[0]
