@@ -1,9 +1,9 @@
-uiautomator2>=3.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-ddddocr>=1.4.11
-Pillow>=10.0.0
-hydra-core>=1.3.0
-omegaconf>=2.3.0
-PyYAML>=6.0
-antlr4-python3-runtime==4.9.*
+# coin11 真正用到的四个（auto.py 的 import 白名单就是这四个 + 标准库）
+adbutils>=2.0
+rapidocr-onnxruntime>=1.3
+onnxruntime>=1.16
+Pillow>=10.0
+numpy>=1.24
+
+# 只有「打 exe 分发版」才需要：
+# pyinstaller>=6.0

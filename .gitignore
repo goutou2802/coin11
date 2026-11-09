@@ -163,3 +163,12 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 .DS_Store
+# 2026-11-09 整理：归档 / 运行时数据 / 日志不进版本库
+_archive/
+logs/
+state/
+targets/shots/
+targets/pending/
+.phone_serial
+.phone_ip
+*.log
