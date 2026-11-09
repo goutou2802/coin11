@@ -6432,6 +6432,17 @@ def one_round(dev, ctx, what):
 
         # ---- R5/R6：点前系统弹窗看门狗（安装/权限/跳转确认框）----
         dh = watchdog_hit(pkg0, act0, text0, rows=rows0)   # 源 v2/core/guard.py（通配+强/成对+fail-closed）
+        # 2026-11-09（同学真机，用户原话「明明就没有系统弹窗，就在淘宝页面呀」）：
+        # 这台手机的 focus 会**报错**——人明明在淘宝任务页，mCurrentFocus 却读到 com.android.settings。
+        # 焦点只是"谁抢了焦点"，不是"用户在不在那一页"。所以：**以这一帧读到的文字为准**。
+        if dh and all(str(x).startswith("package:com.android.settings") for x in dh):
+            _tb_like = [k for k in ("淘金币", "今日速赚", "赚金币", "去完成", "去逛逛", "浏览")
+                        if k in str(text0 or "")]
+            if _tb_like and len(parse_rows(rows0)) >= 3:
+                ctx.log("[guard] focus 说是 %s，但这一屏读到 %s（%d 行）明明是淘宝任务页 "
+                        "-> 不按系统弹窗停机（focus 会骗人）"
+                        % (dh, "/".join(_tb_like), len(parse_rows(rows0))))
+                dh = []
         if dh and all(str(x).startswith("package:com.android.settings") for x in dh) \
                 and not getattr(ctx, "settings_rescued", False):
             # 2026-11-09（同学真机 22:58:46）：前台上着「系统设置」页 —— 多半是滑动/手势带出来的，
