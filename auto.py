@@ -4364,6 +4364,8 @@ def nav_by_ocr(dev, what, log, scans_dir, cold=False, max_tries=6):
     返回 (rows, how, info)；rows 为 None = 没走通（调用方走恢复阶梯）。
     """
     rounds = []
+    _last_tap = None       # 上一次点的是哪个词、点到哪（用来识别「原地打转」）
+    _dup = 0
     if cold:
         try:
             dev.am_start_taobao()
@@ -4414,6 +4416,19 @@ def nav_by_ocr(dev, what, log, scans_dir, cold=False, max_tries=6):
         except Exception as e:
             log("[navocr] %s 点到「%s」时失败：%s: %s" % (what, w, type(e).__name__, e))
             continue
+        # 2026-11-09 真机日志（同学 1080x2412）：「领淘金币」同一个点连点 3 次，页面纹丝不动，
+        # 白白耗掉 20 秒。同一个词 + 同一个坐标连点第 2 次还没进展，就别来第 3 次了。
+        _key = (w, int(x), int(y))
+        if _key == _last_tap:
+            _dup += 1
+        else:
+            _dup = 0
+        _last_tap = _key
+        if _dup >= 1:
+            log("[navocr] %s「%s」在 (%d,%d) 连点两次都没进展 -> 不再重复，交给恢复阶梯"
+                % (what, w, x, y))
+            rounds.append({"ocr": i + 1, "action": "stuck", "word": w, "xy": [x, y]})
+            return None, "ocr-nav-stuck", {"rounds": rounds, "last": list(_key)}
         log("[navocr] %s 第 %d 次 OCR：读到「%s」-> tap (%d,%d)" % (what, i + 1, w, x, y))
         rounds.append({"ocr": i + 1, "action": "tap", "word": w, "xy": [x, y]})
         time.sleep(2.5)
