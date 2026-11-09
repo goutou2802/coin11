@@ -353,6 +353,7 @@ BROWSE_NO_SECS_HINTS = ("浏览",)
 # --------------------------------------------------------------------------- #
 # R1：按钮 x 守卫（事故：算出 1078 点错页）
 # --------------------------------------------------------------------------- #
+BTN_X_REF_W = 1440          # 实测带是在 1440 宽上量的；别的宽度按比例折算
 BTN_X_MIN = 1245
 BTN_X_MAX = 1270
 
@@ -1634,12 +1635,31 @@ def claim_row_card(card):
                 % (CLAIM_USER_AUTH, "/".join(CLAIM_ROW_WORDS), CLAIM_ROW_BUTTON))}
 
 
-def guard_button_x(bx, label="", y=0):
-    """R1：行尾动作的 x 必须落在 [1245,1270]，否则不点并让整个 run 停下。"""
+#: 当前设备的屏宽（Device.__init__ 读到 wm size 后写进来）。0 = 未知，按 1440 参考走。
+SCREEN_W = 0
+
+
+def btn_x_bounds(screen_w=None):
+    """R1 的允许区间：以 1440 宽的实测带（1245~1270）为参考，按屏宽**等比缩放**。
+
+    2026-11-09 用户同学那台（不是 1440 宽）：守卫用的是绝对像素，他那个宽度上按钮永远在
+    x≈940，一条都点不出去 —— 所以在 1440 机型上「按右边缘卡死」的保险，换成「按右边缘的比例卡死」，
+    同一道保险，换分辨率照样成立。
+    """
+    w = int(screen_w or SCREEN_W or 0)
+    if not w or w == BTN_X_REF_W:
+        return BTN_X_MIN, BTN_X_MAX
+    k = float(w) / float(BTN_X_REF_W)
+    return int(round(BTN_X_MIN * k)), int(round(BTN_X_MAX * k))
+
+
+def guard_button_x(bx, label="", y=0, screen_w=None):
+    """R1：行尾动作的 x 必须落在「右边缘那条窄带」里，否则不点并让整个 run 停下。"""
     bx = int(bx)
-    if not (BTN_X_MIN <= bx <= BTN_X_MAX):
-        raise GuardError("R1 按钮 x 越界：%r x=%d y=%d（必须 %d~%d）→ 不点，停下"
-                         % (label, bx, int(y), BTN_X_MIN, BTN_X_MAX))
+    lo, hi = btn_x_bounds(screen_w)
+    if not (lo <= bx <= hi):
+        raise GuardError("R1 按钮 x 越界：%r x=%d y=%d（必须 %d~%d，屏宽 %s）→ 不点，停下"
+                         % (label, bx, int(y), lo, hi, screen_w or SCREEN_W or "参考1440"))
     return bx
 
 
@@ -1661,7 +1681,17 @@ def panel_ok(rows, what):
     if title and info["rows"] >= 3:
         return True, info
     info["all_done"] = bool(title and info["buttons"] == 0 and info["rows"] >= 2)
-    return bool(title and (info["rows"] >= 3 or info["all_done"])), info
+    if title and (info["rows"] >= 3 or info["all_done"]):
+        return True, info
+    # 2026-11-09：标题词表是按我们这两台手机的界面抄的。同学那台淘宝版本/机型不同，
+    # 面板就在眼前但标题一个字都不认得 -> 一直判「不在面板」-> 重开淘宝死循环。
+    # 兜底：**行多 + 按钮多 + 多行带 (n/m) 计数** 同时成立，那就是任务面板（首页那种屏没有这些）。
+    if what != "race":
+        n_counts = sum(1 for c in cards if re.search(r"[(（]\s*\d+\s*/\s*\d+\s*[)）]", str(c.get("name") or "")))
+        if info["rows"] >= 3 and info["buttons"] >= 3 and n_counts >= 2:
+            info["title_bytes_score"] = True
+            return True, info
+    return False, info
 
 
 def progress_in_text(text, what):
@@ -3103,6 +3133,9 @@ class Device:
             self.w, self.h = int(ws.width), int(ws.height)
         except Exception:
             pass
+        # R1 守卫按屏宽等比缩放（见 btn_x_bounds）：这里把真实宽度记下来
+        global SCREEN_W
+        SCREEN_W = int(self.w)
         self.shots = 0
         self.ocrs = 0
         #: 最近一帧是不是全黑（息屏）—— shot() 连续失败时也会把它落盘并置 True
@@ -4350,6 +4383,11 @@ def nav_by_ocr(dev, what, log, scans_dir, cold=False, max_tries=6):
         if ok:
             log("[navocr] %s 第 %d 次 OCR：已在面板 %s" % (what, i + 1, info))
             return rows, "ocr-nav", {"rounds": rounds, "info": info}
+        # 2026-11-09：认不出面板时，把「为什么」写进日志 —— 光看「不在面板」四个字，
+        # 远端同学的机器上根本没法判断是标题不认得、还是 OCR 没读到字。
+        _sample = " / ".join(str(r.get("t") or "")[:14] for r in rows[:8])
+        log("[navocr] %s 第 %d 次 OCR：判不出面板 %s　屏上读到：%s"
+            % (what, i + 1, info, _sample or "（一个字都没读到）"))
         hit = None
         for r in rows:
             txt = str(r.get("t") or "")
