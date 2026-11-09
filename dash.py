@@ -2280,6 +2280,28 @@ def _keep_load():
             keep_set(s, True)
 
 
+OPEN_LOG = os.path.join(STATE_DIR, "open-browser.log")
+
+
+def _note_browser(msg):
+    """记一条「开浏览器」的实况：面板没开出来时，这是唯一能看的线索。
+
+    2026-11-09 用户反馈分发版「不自动打开监控页面」：到底是没找到浏览器、还是被执行环境拦了，
+    光看控制台看不出来（分发版经常是隐藏控制台跑的），所以落一份盘到 state/open-browser.log。
+    """
+    line = "%s %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(OPEN_LOG, "a", encoding="utf-8") as f:
+            f.write(line + chr(10))
+    except OSError:
+        pass
+    try:
+        print("[dash] 开浏览器：%s" % msg, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def open_panel_window(url):
     """用 Chrome/Edge 的 --app 模式开一个**独立窗口**（没有地址栏/标签页）。
 
@@ -2295,20 +2317,32 @@ def open_panel_window(url):
             continue
         cands.append(os.path.join(root, "Google", "Chrome", "Application", "chrome.exe"))
         cands.append(os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe"))
-    for exe in cands:
-        if not os.path.isfile(exe):
-            continue
+    found = [x for x in cands if os.path.isfile(x)]
+    if not found:
+        _note_browser("没找到 Chrome/Edge（这些路径都不存在：%s）" % " ; ".join(cands))
+    for exe in found:
         try:
             subprocess.Popen([exe, "--app=" + url], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _note_browser("已用 %s --app 打开 %s" % (os.path.basename(exe), url))
             return exe
-        except OSError:
+        except Exception as exc:  # noqa: BLE001
+            _note_browser("%s --app 启动失败：%s" % (os.path.basename(exe), exc))
             continue
+    # 兜底 1：ShellExecute（= 双击一个网址），走系统默认浏览器，最不容易被环境拦住
+    try:
+        os.startfile(url)             # noqa: S606 (Windows only)
+        _note_browser("已交给系统默认浏览器（os.startfile）打开 %s" % url)
+        return "startfile"
+    except Exception as exc:  # noqa: BLE001
+        _note_browser("os.startfile 失败：%s" % exc)
+    # 兜底 2：webbrowser 模块
     try:
         import webbrowser
-        webbrowser.open(url)          # 兜底：默认浏览器（关不掉窗口，页面会提示手动关）
-    except Exception:  # noqa: BLE001
-        pass
+        ok = webbrowser.open(url)
+        _note_browser("webbrowser.open 返回 %r（%s）" % (ok, url))
+    except Exception as exc:  # noqa: BLE001
+        _note_browser("webbrowser.open 失败：%s" % exc)
     return ""
 
 
@@ -6960,8 +6994,10 @@ def main():
     load_cfg()
     _keep_load()          # 2026-11-02：按上次的选择恢复保活开关（重启不丢）
     if _port_in_use():
-        print("[dash] 已经有面板在 http://%s:%d/ 跑着了，本次不再启动（直接开浏览器即可）"
-              % (HOST, PORT))
+        # 2026-11-09 用户反馈「分发版不自动打开监控页面」：原来这里只打印一句就退了，等于
+        # 「面板已经在跑的时候，再双击一次什么都不发生」。改成：不再重复起服务，但**把页面打开**。
+        _note_browser("端口 %d 已被占用：不重复起服务，只打开页面" % PORT)
+        open_panel_window("http://%s:%d/" % (HOST, PORT))
         return 0
     if not getattr(sys, "frozen", False) and not os.path.exists(AUTO_PY):
         print("[dash] 警告：找不到 coin11/auto.py，按钮会启动失败（只读监控仍可用）")
@@ -6973,10 +7009,10 @@ def main():
     srv.daemon_threads = True
     global _SRV
     _SRV = srv                   # 【关闭面板】要先拿到这个句柄才能优雅退出
-    if os.environ.get("COIN11_NO_BROWSER") != "1":
-        _opened = open_panel_window("http://%s:%d/" % (HOST, PORT))
-        if _opened:
-            print("[dash] 面板窗口：%s（--app 模式，关面板时会一起关掉）" % os.path.basename(_opened))
+    if os.environ.get("COIN11_NO_BROWSER") == "1":
+        _note_browser("跳过（环境变量 COIN11_NO_BROWSER=1）")
+    else:
+        open_panel_window("http://%s:%d/" % (HOST, PORT))
     adb_path()
     live_start()
     adopt_existing_runs(print)   # 接管 dash 启动前就在跑的 auto.py（别再起第二个）

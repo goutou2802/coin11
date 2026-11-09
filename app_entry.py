@@ -136,9 +136,15 @@ def _open_when_up(timeout=20.0):
 def run_dash():
     # 开浏览器这件事统一由 dash.py 负责（它知道端口是不是真的由自己起、也能用 --app 模式开窗口，
     # 这样【⏻ 关闭面板】才能把那个窗口一起关掉）。这里只提示一句，绝不重复开第二个。
-    if _FROZEN and _port_busy():
-        print("[coin11] 面板已经在跑了：%s（这次不开窗口，也不重复起服务）" % _url())
     import dash
+    if _FROZEN and _port_busy():
+        # 已经在跑了：不重复起服务，但把页面打开 —— 用户双击第二次就是想要那个页面
+        print("[coin11] 面板已经在跑了，打开页面：%s" % _url(), flush=True)
+        try:
+            dash.open_panel_window(_url())
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
     return dash.main()
 
 
