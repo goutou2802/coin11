@@ -9157,6 +9157,9 @@ def build_args(argv=None):
     ap.add_argument("--selftest", action="store_true", help="离线自测：不连手机")
     # 2026-11-03 用户需求（App 自检）：只读 pm list packages + 落盘 + 打印表格，
     # **不跑任务、不点屏幕、不滑动、不 am start**。不带 --serial = state/devices.json 里每台各查一份。
+    ap.add_argument("--diag", action="store_true",
+                    help="体检模式：只读不点击。拍一张屏 + 整屏 OCR + 面板判定 + 切出来的行/芯片坐标"
+                         "一起写进 data/diag/<时间>/，出问题时把这个目录发回来即可")
     ap.add_argument("--appcheck", action="store_true",
                     help="App 自检：只读 pm list packages，打印表格并写 state/apps.json；"
                          "不跑任务、不点屏幕、不滑动。不带 --serial 就查 devices.json 里每一台")
@@ -9255,6 +9258,8 @@ def main(argv=None):
         return run_selftest()
     # 2026-11-03 用户需求：--appcheck 是**只读自检模式**，先于 --what 解析分派
     # （本模式不跑任务、不点屏幕、不滑动，也绝不进 any 面板/脚本阶段）。
+    if getattr(args, "diag", False):
+        return run_diag(args)
     if getattr(args, "appcheck", False):
         return run_appcheck(args)
     # 2026-11-02 用户要求（第 7 条 / 7.3-1）：--what 支持逗号组合（all/coin/race/scan 语义不变）。
@@ -10110,6 +10115,127 @@ def appcheck_save_doc(doc, path):
         return True
     except Exception:
         return False
+
+
+def _diag_pick_serial(args, log):
+    """体检用哪台：显式 --serial 优先；否则当前连着的第一台；再否则设备表第一台。"""
+    ser = str(getattr(args, "serial", "") or "").strip()
+    if ser and not ser.startswith("192.168.1.8"):
+        return ser
+    try:
+        import adbutils
+        for i in adbutils.adb.list():
+            if str(getattr(i, "state", "device") or "").lower() == "device":
+                return str(i.serial)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cfg = jload(os.path.join(STATE_DIR, "devices.json"))
+        for d in (cfg.get("devices") or []):
+            ss = str((d or {}).get("serial") or "").strip()
+            if ss:
+                return ss
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def run_diag(args, log=print):
+    """--diag 体检模式：**只读**（不点击、不滑动、不 BACK），把排障要看的东西一次打全。
+
+    产物：data/diag/<时间戳>/
+        01_screen.png     当前这一屏
+        02_ocr.txt        整屏 OCR 原文（x/y/文字），人能直接看
+        02_ocr.json       同上，程序用
+        03_rows.json      切出来的行：名字 / 计数 / 动作 / 按钮文字 / 按钮坐标 / 分类结论
+        REPORT.txt        一页结论：分辨率、焦点、面板判定、行数、芯片坐标、守卫是否放行
+    """
+    serial = _diag_pick_serial(args, log)
+    if not serial:
+        log("[diag] 一台设备都没读到：手机上打开「USB 调试」、插上线、允许授权后再试")
+        return 2
+    try:
+        import adbutils
+        _states = {(str(i.serial), str(getattr(i, "state", "")).lower()) for i in adbutils.adb.list()}
+    except Exception:  # noqa: BLE001
+        _states = set()
+    _online = {sn for sn, st in _states if st == "device"}
+    if _online and serial not in _online:
+        log("[diag] 设备 %s 现在不在线（adb 报的是 %s）。请拔插一次数据线、手机上点「允许 USB 调试」再试"
+            % (serial, ", ".join("%s=%s" % (a, b) for a, b in sorted(_states)) or "空"))
+        return 2
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "diag", stamp)
+    outdir = os.path.normpath(outdir)
+    os.makedirs(outdir, exist_ok=True)
+    log("=== coin11 体检（只读：不点、不滑、不 BACK）===")
+    log("serial=%s  产物目录=%s" % (serial, outdir))
+    dev = Device(serial, log)
+    L = []
+    L.append("coin11 体检报告  %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    L.append("serial            : %s" % serial)
+    L.append("分辨率(w x h)      : %dx%d    SCREEN_W=%s" % (dev.w, dev.h, SCREEN_W))
+    try:
+        L.append("density           : %s" % str(dev.shell("wm density")).strip()[:60])
+    except Exception as exc:  # noqa: BLE001
+        L.append("density           : (读不到：%s)" % exc)
+    try:
+        f = dev.focus()
+        L.append("前台 focus        : %s" % (str(f)[:160],))
+    except Exception as exc:  # noqa: BLE001
+        L.append("前台 focus        : (读不到：%s)" % exc)
+    png = os.path.join(outdir, "01_screen.png")
+    try:
+        dev.shot(png)
+        rows = dev.ocr(png)
+    except Exception as exc:  # noqa: BLE001
+        L.append("")
+        L.append("截图/OCR 失败：%s: %s" % (type(exc).__name__, exc))
+        L.append("多半是：息屏 / 没解锁 / 淘宝没在前台 / 数据线掉了。解锁手机、把淘宝切到前台再跑一次。")
+        with open(os.path.join(outdir, "REPORT.txt"), "w", encoding="utf-8") as fh:
+            fh.write(chr(10).join(L))
+        log("[diag] 截图失败，报告已落盘：%s" % outdir)
+        for line in L[-6:]:
+            log("  " + line)
+        return 2
+    with open(os.path.join(outdir, "02_ocr.txt"), "w", encoding="utf-8") as fh:
+        for r in sorted(rows, key=lambda r: (int(r.get("y", 0)), int(r.get("x", 0)))):
+            fh.write(("x=%-5d y=%-5d w=%-4d %s" + chr(10))
+                     % (int(r.get("x", 0)), int(r.get("y", 0)), int(r.get("w", 0)), r.get("t")))
+    jdump(os.path.join(outdir, "02_ocr.json"), rows)
+    ok, info = panel_ok(rows, "coin")
+    cards = parse_rows(rows)
+    jdump(os.path.join(outdir, "03_rows.json"), cards)
+    L.append("OCR 文字块        : %d" % len(rows))
+    L.append("面板判定(coin)     : %s   %s" % (ok, info))
+    L.append("切出行数          : %d" % len(cards))
+    L.append("R1 文字按钮区间    : %s" % (btn_x_bounds(),))
+    L.append("R1 芯片区间        : %s" % (chip_x_bounds(),))
+    L.append("")
+    L.append("逐行：")
+    for i, c in enumerate(cards):
+        bx = c.get("btn_x")
+        guard = "-"
+        if bx:
+            try:
+                guard_button_x(bx, c.get("button") or "", c.get("btn_y") or 0,
+                               kind=(c.get("action") or ""))
+                guard = "放行"
+            except GuardError:
+                guard = "越界被拒"
+        dec = classify_card(c)
+        L.append("  [%02d] %-28s 计数=%-6s 动作=%-7s 按钮=%-6s x=%-5s 守卫=%s -> 可做=%s %s"
+                 % (i, str(c.get("name"))[:28], _count(c.get("n"), c.get("m")) or "-",
+                    c.get("action"), c.get("button") or "-", bx or "-", guard,
+                    dec.get("doable"), (dec.get("why") or "")[:40]))
+    L.append("")
+    L.append("说明：这个模式一个字都不点。把整个目录压缩发回来即可定位问题。")
+    with open(os.path.join(outdir, "REPORT.txt"), "w", encoding="utf-8") as fh:
+        fh.write(chr(10).join(L))
+    log("[diag] 完成：%s" % outdir)
+    for line in L[:12]:
+        log("  " + line)
+    return 0
 
 
 def run_appcheck(args, log=print):
