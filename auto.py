@@ -138,7 +138,27 @@ NAV_EXPAND = (1253, 2491)        # 收起态的「展开」       round-002/02_b
 NAV_RACE_TASKS = (1298, 1320)    # 赛车页「做任务赚能量」  p4/report.md
 
 # R7：扫描/浏览都用这一条向下手势
-SWIPE_DOWN = (720, 2400, 720, 1600, 300)
+SWIPE_DOWN = (720, 2400, 720, 1600, 300)     # 兼容老调用：1440 宽机型的实测值（新代码用 swipe_down_args）
+
+
+def swipe_down_args(dev):
+    """「往下翻一屏」的滑动参数：**按这台设备的屏幕尺寸算**，别落进底部手势区。
+
+    2026-11-09（同学 1080x2412 真机）：老常量写死 (720,2400)->(720,1600)，
+    他那台屏高 2412 —— 起点 y=2400 已经贴在**手势导航条**上，每一下都被系统当成
+    上滑手势吃掉：于是「点完不进任务、还老是退出淘宝」。这正是「明明进了任务页却不做」的元凶。
+    现在：起点 = 0.72 屏高、终点 = 0.42 屏高，两头都留安全边（不被手势区/无障碍条吃掉）。
+    """
+    try:
+        w, h = int(dev.w), int(dev.h)
+    except Exception:  # noqa: BLE001
+        w, h = 1440, 3168
+    x = int(w * 0.5)
+    # 取法跟着原来 1440x3168 上实测的比例走（0.757 -> 0.505），再整体下移留出安全边：
+    # 这样我们两台手机的手感基本不变，而 2412 高的机器起点也离手势条足够远。
+    y1 = int(h * 0.74)
+    y2 = int(h * 0.49)
+    return x, y1, x, y2, 300
 
 # --------------------------------------------------------------------------- #
 # 2026-11-02 19:17 用户现场要求：导航写死、几乎不 OCR（第四批·导航改造）
@@ -2845,7 +2865,7 @@ def adaptive_dwell(dev, secs, shots_dir, tag, want="slide", start_ts=None, start
         if mode == "swipe":
             if first_swipe_ms is None:
                 first_swipe_ms = int(time.time() * 1000)
-            dev.swipe(*SWIPE_DOWN)
+            dev.swipe(*swipe_down_args(dev))
             swipes += 1
             time.sleep(0.35)
             if time.time() - last_probe >= DWELL_PROBE_EVERY_S:
@@ -4955,7 +4975,8 @@ def expand_panel(dev, rows, log, scans_dir):
     else:
         r = cands[0]
         cx, cy = center_x(r), int(r["y"])
-    if not (900 < cx < 1400) or not (1500 < cy < 3100):
+    if not (_x_at(0.625, 900) < cx < _x_at(0.972, 1400)) \
+            or not (int(dev.h * 0.47) < cy < int(dev.h * 0.98)):
         cx, cy = NAV_EXPAND
     log("[expand] 点「展开」(%d,%d)，展开前行数=%d" % (cx, cy, before))
     dev.tap(cx, cy)
@@ -4997,7 +5018,7 @@ def full_scan(dev, what, log, scans_dir, max_screens=14, settle=0.9):
             log("[scan] %s 第 %d 屏与上一屏一致 → 到底（共 %d 屏）" % (what, k, k + 1))
             break
         prev_sig, prev_text = sig, text
-        dev.swipe(*SWIPE_DOWN)
+        dev.swipe(*swipe_down_args(dev))
         time.sleep(settle)
 
     table = merge_scan_rows(per)
@@ -5043,7 +5064,7 @@ def browse_dwell(dev, secs, shots_dir, tag, before=None, start_ts=None, start_ba
     while time.time() < end:
         if first_swipe_ms is None:
             first_swipe_ms = int(time.time() * 1000)
-        dev.swipe(*SWIPE_DOWN)
+        dev.swipe(*swipe_down_args(dev))
         k += 1
         time.sleep(0.35)
     dur = round(time.time() - anchor, 2)
@@ -5084,7 +5105,7 @@ def swipe_only_dwell(dev, secs, shots_dir, tag, mode="alipay", baseline_words=()
                 break
         if first_swipe_ms is None:
             first_swipe_ms = int(time.time() * 1000)
-        dev.swipe(*SWIPE_DOWN)
+        dev.swipe(*swipe_down_args(dev))
         k += 1
         time.sleep(0.35)
     return {"mode": mode, "requested_s": round(need, 1),
@@ -7330,8 +7351,11 @@ def drive_panel(dev, ctx, what, cold=True, leave_prev=False):
         # 2026-11-03 用户口径：折叠**不在这里**展开（速赚在前、展开在后，任务多了「展开」
         # 还会被挤到屏幕下面）。折叠由下面「一页一页做」的循环遇到才点（见 fold_button）。
     else:
-        rows, exp = expand_panel(dev, rows, ctx.log, ctx.scans_dir)
-        ctx.log("[panel] %s ready: %s / %s / %s" % (what, how, exp, info))
+        # 2026-11-09 用户真机反馈（原话）：「打开那个淘金币任务页面明明上面有任务，但是就是不做，
+        # 非要点下面展开」。折叠**不该在进门时处理**：先做看得见的行，这一屏真没可做行了，
+        # 循环里再按当帧 OCR 盒点「展开」（见 drive_panel 的 fold_button 分支）。
+        ctx.log("[panel] %s ready: %s / 先做看得见的 %d 行（不预先展开）/ %s"
+                % (what, how, len(parse_rows(rows or [])), info))
 
     # 2026-11-02 用户要求（第 4 条）：一页一页做 —— 直接在这一屏开始做，不做全表扫描、不回顶部、不重进面板。
     #   「这一页还有没有可做行」= one_round 的返回（它每轮自己抓帧重读行，返回 no-doable 就是这一页空了）；
@@ -7383,7 +7407,7 @@ def drive_panel(dev, ctx, what, cold=True, leave_prev=False):
                 soft_backs += 1
                 # 用**往回滚一屏**代替 BACK：BACK 会真的把面板退出去（退到主页面），
                 # 往回滚只是把被滚出屏幕的标题找回来，风险低得多。
-                x1, y1, x2, y2, dur = SWIPE_DOWN
+                x1, y1, x2, y2, dur = swipe_down_args(dev)
                 ctx.log("[panel] %s 判成不在面板 -> 温和恢复：往回滚一屏把标题找回来"
                         "（%d/2），不进恢复阶梯" % (what, soft_backs))
                 dev.swipe(x2, y2, x1, y1, dur)
@@ -7434,7 +7458,7 @@ def drive_panel(dev, ctx, what, cold=True, leave_prev=False):
         ctx.log("[panel] %s 这一页做空了 -> 向下滚一屏找下面的任务（第 %d 屏）"
                 % (what, scrolls + 1))
         ctx.just_scrolled = True      # 下一轮若读到空白帧，别判"面板丢了"（见 one_round 里那条）
-        dev.swipe(*SWIPE_DOWN)
+        dev.swipe(*swipe_down_args(dev))
         time.sleep(0.9)
         scrolls += 1
 
