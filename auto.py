@@ -375,6 +375,16 @@ DONE_LABELS = ("已完成", "已领取", "已参加")
 #: 有些行末端不是按钮而是一枚奖励芯片（+50），点它同样进任务（round-130 现证）
 REWARD_CHIP_RE = re.compile(r"^[+＋]\s*\d{1,6}$")
 
+
+def _x_at(fraction, default_px, ref_w=1440):
+    """把「在 1440 宽上量出来的像素阈值」换成当前屏宽下的像素。
+
+    2026-11-09（同学 1080x2412 真机截图）：行尾锚点原来写死 center_x>900 / x>1100，
+    他那台窄屏上 +30 芯片在 x=904 —— 按 1440 的尺子永远不算锚点，一行都切不出来。
+    """
+    w = int(SCREEN_W or ref_w)
+    return int(round(w * (default_px / float(ref_w))))
+
 #: R5 黑名单词：命中即跳过（行名 + 副标题一起扫）
 BLACK_WORDS = ("邀请", "助力", "去玩", "游戏", "下单", "买", "折扣", "领取", "立即领",
                "领现金", "点击去逛", "点击商品", "授权", "开通", "同意", "支付", "转账",
@@ -953,7 +963,7 @@ def unknown_end_buttons(rows, ypad_top=80):
         lab = norm(r.get("t"))
         if not (2 <= len(lab) <= 8) or not _CJK_RE.search(lab):
             continue
-        if center_x(r) <= 900:
+        if center_x(r) <= _x_at(0.625, 900):
             continue
         if lab in ACTION_LABELS or lab in TAP_LABELS or lab in DONE_LABELS:
             continue
@@ -962,7 +972,7 @@ def unknown_end_buttons(rows, ypad_top=80):
         by = int(r.get("y", 0))
         blk = [x for x in (rows or [])
                if by - ypad_top <= int(x.get("y", 0)) <= by - 15
-               and center_x(x) < 1100 and str(x.get("t") or "").strip()]
+               and center_x(x) < _x_at(0.764, 1100) and str(x.get("t") or "").strip()]
         if not blk or lab in seen:
             continue
         seen.add(lab)
@@ -979,11 +989,11 @@ def parse_rows(rows, ypad_top=80, ypad_bot=100, enrich=True):
     acts = []
     for r in rows:
         lab = norm(r.get("t"))
-        if not lab or center_x(r) <= 900:
+        if not lab or center_x(r) <= _x_at(0.625, 900):
             continue
         if lab in ACTION_LABELS:
             acts.append(dict(r, button=lab, action="button"))
-        elif REWARD_CHIP_RE.match(lab) and int(r.get("x", 0)) > 1100:
+        elif REWARD_CHIP_RE.match(lab) and int(r.get("x", 0)) > _x_at(0.764, 1100):
             # 同一行末端也可能只是「+50」这样的奖励芯片（round-130 点它同样进任务）
             acts.append(dict(r, button=lab, action="chip"))
     acts.sort(key=lambda r: int(r["y"]))
@@ -995,7 +1005,7 @@ def parse_rows(rows, ypad_top=80, ypad_bot=100, enrich=True):
             top = max(top, int(acts[i - 1]["y"]) + 40)
         blk = [r for r in rows if top <= int(r["y"]) <= int(b["y"]) + ypad_bot]
         name = " ".join(str(r["t"]) for r in blk
-                        if int(r["y"]) <= int(b["y"]) - 15 and center_x(r) < 1100)
+                        if int(r["y"]) <= int(b["y"]) - 15 and center_x(r) < _x_at(0.764, 1100))
         sub = " ".join(str(r["t"]) for r in blk if int(r["y"]) > int(b["y"]) + 10)
         raw = "|".join(str(r["t"]) for r in blk)
         m = CPAT.search(raw) or CPAT_LOOSE.search(raw)
@@ -1653,10 +1663,23 @@ def btn_x_bounds(screen_w=None):
     return int(round(BTN_X_MIN * k)), int(round(BTN_X_MAX * k))
 
 
-def guard_button_x(bx, label="", y=0, screen_w=None):
-    """R1：行尾动作的 x 必须落在「右边缘那条窄带」里，否则不点并让整个 run 停下。"""
+#: 芯片（+30 那种圆徽章）的按钮中心比文字按钮更靠里一点：按屏宽给一条稍宽的带。
+#: 文字按钮仍然是 1245~1270/1440 那条窄带（1078 那次算错的点照样会被拒）。
+CHIP_REL_BAND = (0.78, 0.95)
+
+
+def chip_x_bounds(screen_w=None):
+    w = int(screen_w or SCREEN_W or 0) or BTN_X_REF_W
+    return int(round(w * CHIP_REL_BAND[0])), int(round(w * CHIP_REL_BAND[1]))
+
+
+def guard_button_x(bx, label="", y=0, screen_w=None, kind=""):
+    """R1：行尾动作的 x 必须落在「右边缘那条窄带」里，否则不点并让整个 run 停下。
+
+    kind="chip" = 这一行末端是奖励芯片（+30），它比文字按钮更靠里，用芯片专用那条带。
+    """
     bx = int(bx)
-    lo, hi = btn_x_bounds(screen_w)
+    lo, hi = chip_x_bounds(screen_w) if kind == "chip" else btn_x_bounds(screen_w)
     if not (lo <= bx <= hi):
         raise GuardError("R1 按钮 x 越界：%r x=%d y=%d（必须 %d~%d，屏宽 %s）→ 不点，停下"
                          % (label, bx, int(y), lo, hi, screen_w or SCREEN_W or "参考1440"))
@@ -1676,7 +1699,8 @@ def panel_ok(rows, what):
     title = any(k in text for k in PANEL_MARKERS[what])
     cards = parse_rows(rows)
     info = {"title": bool(title), "rows": len(cards),
-            "buttons": sum(1 for c in cards if c["action"] == "button"),
+            # 行尾可能是文字按钮，也可能是 +30 这种奖励芯片 —— 两种都算「这一行有动手入口」
+            "buttons": sum(1 for c in cards if c["action"] in ("button", "chip")),
             "ocr_n": len(rows)}
     if title and info["rows"] >= 3:
         return True, info
@@ -6470,7 +6494,8 @@ def one_round(dev, ctx, what):
             # 2026-11-03 用户明确授权（第 6 条）：这一行末端就是「领取奖励」->
             # 走和第 7 条**同一条**领取路径（claim_task 一个 kind，绝不写两套）。
             return run_claim(dev, ctx, r, what, claim_row_card(card), rows0)
-        tx = guard_button_x(card["btn_x"], card["button"], card["btn_y"])   # R1，越界抛
+        tx = guard_button_x(card["btn_x"], card["button"], card["btn_y"],
+                            kind=(card.get("action") or ""))   # R1，越界抛（芯片用芯片带）
         ty = card["btn_y"]
         n0, m0 = card["n"], card["m"]
         # 源 _archive/root_py/run_energy.py plan()：浏览N秒=持续滑动、玩N秒=静止、去逛=静止
