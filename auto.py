@@ -9282,6 +9282,7 @@ def main(argv=None):
         return run_selftest()
     # 2026-11-03 用户需求：--appcheck 是**只读自检模式**，先于 --what 解析分派
     # （本模式不跑任务、不点屏幕、不滑动，也绝不进 any 面板/脚本阶段）。
+    ensure_writable_temp()          # adb 守护进程要靠 TEMP，先确保它能写
     if getattr(args, "diag", False):
         return run_diag(args)
     if getattr(args, "appcheck", False):
@@ -10162,6 +10163,39 @@ def _diag_pick_serial(args, log):
     except Exception:  # noqa: BLE001
         pass
     return ""
+
+
+def ensure_writable_temp(log=print):
+    """TEMP 写不进去时，把 TEMP/TMP 换成本工具自己的 data/tmp。
+
+    2026-11-09 实测（这台开发机）：某些电脑的系统 TEMP 对 adb 是**不可写**的 ——
+    adb 守护进程一启动就报 cannot open adb.log: Permission denied 并退出，
+    于是「一台设备都连不上」。换成 data/tmp 后立刻正常。这一步对所有子进程
+    （adb / auto / 自定义脚本）都生效。
+    """
+    import tempfile
+    cur = os.environ.get("TEMP") or os.environ.get("TMP") or ""
+    if cur:
+        try:
+            fd, probe = tempfile.mkstemp(prefix="coin11-temp-", dir=cur)
+            os.close(fd)
+            os.remove(probe)
+            return cur                       # 能写：不动
+        except Exception:  # noqa: BLE001
+            pass
+    dst = os.path.join(_home(), "data", "tmp")
+    try:
+        os.makedirs(dst, exist_ok=True)
+        fd, probe = tempfile.mkstemp(prefix="coin11-temp-", dir=dst)
+        os.close(fd)
+        os.remove(probe)
+    except Exception as exc:  # noqa: BLE001
+        log("[env] TEMP 不可写，备用目录也建不出来（%s）-> 保持原样，可能连不上 adb" % exc)
+        return cur
+    os.environ["TEMP"] = dst
+    os.environ["TMP"] = dst
+    log("[env] 系统 TEMP 不可写（adb 会启动失败）-> 临时目录改用 %s" % dst)
+    return dst
 
 
 def run_diag(args, log=print):

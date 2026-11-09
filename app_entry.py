@@ -93,6 +93,28 @@ def bootstrap():
             stream.reconfigure(errors="replace")
         except Exception:  # noqa: BLE001
             pass
+    # TEMP 不可写时 adb 守护进程起不来（Windows 上确实有这种机器）-> 换成本工具自己的目录
+    import tempfile as _tf
+    _tmp_home = os.path.join(data, "tmp")
+    _cur = os.environ.get("TEMP") or os.environ.get("TMP") or ""
+    _ok = False
+    if _cur:
+        try:
+            _fd, _probe = _tf.mkstemp(prefix="coin11-temp-", dir=_cur)
+            os.close(_fd)
+            os.remove(_probe)
+            _ok = True
+        except Exception:  # noqa: BLE001
+            _ok = False
+    if not _ok:
+        try:
+            os.makedirs(_tmp_home, exist_ok=True)
+            os.environ["TEMP"] = _tmp_home
+            os.environ["TMP"] = _tmp_home
+            print("[coin11] 系统 TEMP 不可写 -> 临时目录改用 %s" % _tmp_home, flush=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     adb_dir = os.path.join(app, "adb")
     adb = os.path.join(adb_dir, "adb.exe")
     if os.path.isfile(adb):
